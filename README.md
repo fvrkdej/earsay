@@ -55,7 +55,7 @@ You need an Apple Silicon Mac (M1 or newer) on macOS 14 or later.
 2. Drag **Earsay** into your Applications folder and open it.
 3. The first time, macOS says it can't check the app for malicious software. That's because it's a free app without a paid Apple developer account, not because anything's wrong. Open **System Settings > Privacy & Security**, scroll down, and press **Open Anyway**. You only do this once.
 4. The welcome walks you through the two permissions.
-5. The first time it reads, it downloads the voice (about 500 MB, once). On a slow connection that can take 10 to 15 minutes, so give it a moment. After that it works with no internet.
+5. The first time it reads, it downloads the voice once (about 500 MB, usually a minute or two). After that it works with no internet.
 
 When a new version comes out, the menu shows "Update available".
 
