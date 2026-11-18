@@ -179,3 +179,7 @@ To check what she actually says, transcribe the audio from `Probe ... out.wav` w
 ## The name (18 Nov 2026)
 
 The app is called **Earsay** (Deji's pick, 18 Nov): ear + say, a play on "hearsay". Plain "Read Aloud" belongs to Microsoft Edge and a big Chrome extension, and "Hearsay" is crowded (a text-to-speech iPhone app, a known company). Only the visible name changed: the bundle id stays `io.autimized.readaloud`, the signing certificate stays "Read Aloud Dev", the Swift targets stay `ReadAloud`/`ReadAloudCore`, and `~/.local/share/read-aloud/` keeps the log and source, so settings, bookmarks and permissions carry over. The app now lives at `~/Applications/Earsay.app` and exports to `~/Music/Earsay/`. The repo folder `~/My Workspace/read-aloud-app` keeps its name for now.
+
+## The GitHub repo (18 Nov 2026)
+
+`github.com/fvrkdej/earsay`, **private until launch day**, when it goes public together with the LinkedIn post (Deji's call). It starts from one clean commit, so Deji's personal email and the build history stay off GitHub. Work on `main`, which tracks `origin/main`. This repo's git config commits as `Deji Ademosu <114817270+fvrkdej@users.noreply.github.com>` (GitHub's private address). The full build history before that stays local only, on the branch `private-history`. Never push that branch, because every commit on it carries his personal email.
