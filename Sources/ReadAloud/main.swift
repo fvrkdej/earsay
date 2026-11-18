@@ -325,13 +325,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("io.autimized.readaloud.render"), object: nil, queue: .main
         ) { [weak self] note in
-            guard let self, let name = note.object as? String else { return }
+            guard let self, var name = note.object as? String else { return }
             self.libraryModel.refresh()
             let pm = PillModel()
             pm.text = "It is a truth universally acknowledged, that a single man in possession of a good fortune, must be in want of a wife."
             pm.index = 40; pm.total = 100; pm.hasChapters = true; pm.caption = "Chapter 1 of 61  ·  40%  ·  6 h 12 min left"
             pm.mini = name == "mini"
             let lv = LevelModel(); lv.level = 0.6
+            // "pill|<text>|<caption>|<index>|<total>|<level>|<file name>": any sentence, for demo videos.
+            if name.hasPrefix("pill|") {
+                let p = name.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+                pm.text = p.count > 1 ? p[1] : pm.text
+                pm.caption = p.count > 2 ? p[2] : ""
+                pm.hasChapters = false
+                pm.index = p.count > 3 ? Int(p[3]) ?? 0 : 0
+                pm.total = p.count > 4 ? Int(p[4]) ?? 1 : 1
+                lv.level = p.count > 5 ? Float(p[5]) ?? 0.6 : 0.6
+                name = p.count > 6 ? p[6] : "pill-custom"
+            }
             let view: AnyView
             switch name {
             case "library": view = AnyView(LibraryView(model: self.libraryModel).frame(width: 720, height: 560))
