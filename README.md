@@ -75,6 +75,10 @@ For an audiobook with chapters, install ffmpeg (`brew install ffmpeg`). Without 
 
 How it works, and how to change it: [docs/DEVELOPING.md](docs/DEVELOPING.md).
 
+## Help make it better
+
+Found a word she says wrong, an app where the highlight gets lost, or something you'd fix yourself? Everyone's welcome, with or without code. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Credits and licences
 
 - **The voice:** [Pocket TTS](https://huggingface.co/kyutai/pocket-tts) by [Kyutai](https://kyutai.org), licensed CC BY 4.0, in the Core ML version by [FluidInference](https://huggingface.co/FluidInference/pocket-tts-coreml). The app downloads the model on first launch; it isn't included here.
