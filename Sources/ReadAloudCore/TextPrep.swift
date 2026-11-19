@@ -163,14 +163,15 @@ public enum TextPrep {
         sub(#"^>\s?"#, "")                               // quote marks
         sub(#"^\|\s*|\s*\|$"#, "")                        // table rows: drop the outer pipes
         sub(#"\[([^\]]+)\]\([^)]*\)"#, "$1")             // markdown links [text](url) -> text
-        sub(#"https?://\S+|www\.\S+"#, "")               // bare links: skip
+        map(#"(?:https?://|www\.)[^\s<>()]+[^\s<>().,;:!?'\"]"#) { speakLink($0[0]) }   // bare links: the site, plus a short path
         sub(#"\[\d+(\s*,\s*\d+)*\]"#, "")                // citation marks [1] [2, 3]
         sub(#"[\p{Extended_Pictographic}\x{FE0F}\x{200D}\x{20E3}]"#, "")   // emojis
         sub(#"[*_`]+(?=\S)|(?<=\S)[*_`]+"#, "")          // emphasis and code marks
         sub(#"\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b"#, "")  // commit hashes: skip
 
         // People and places on the internet.
-        map(#"([\w.+-]+)@([\w-]+(?:\.[\w-]+)+)"#) { $0[1] + " at " + $0[2].replacingOccurrences(of: ".", with: " dot ") }
+        map(#"([\w.+-]+)@([\w-]+(?:\.[\w-]+)+)"#) { $0[1] + " at " + speakLink($0[2]) }
+        map(#"(?<![\w@./])[A-Za-z0-9][\w-]*(?:\.[\w-]+)*\.(?:ai|io|com|co|uk|net|org|app|dev|so|ng|me|xyz|gg|tv|edu|gov)(?:/[^\s<>()]*[^\s<>().,;:!?'\"])?(?![\w])"#) { speakLink($0[0]) }   // github.com/name/repo, example.co.uk
         sub(#"(?<!\w)@(\w+)"#, "at $1")                  // @handle
         map(#"(?<!\w)#(\d+)"#) { m in                    // #1137 -> "number eleven thirty seven"
             let d = m[1]
@@ -219,6 +220,20 @@ public enum TextPrep {
             ][$0[1]] ?? $0[1])
         }
 
+        // Screen shapes before clock times: 16:9 -> "sixteen by nine", 9:16 -> "nine by sixteen".
+        map(#"(?<![\d:.])\b(16:9|9:16|4:3|3:4|3:2|2:3|21:9|4:5|5:4|1:1)\b(?![\d:])"#) { m in
+            let p = m[1].split(separator: ":").map { numberWords(Int($0)!) }
+            return p[0] + " by " + p[1]
+        }
+        // Clock times: 21:52 -> "twenty-one fifty-two", 9:30 -> "nine thirty", 14:05 -> "fourteen oh five",
+        // 9:00 -> "nine o'clock", 21:00 -> "twenty-one hundred", 3pm -> "three p m" (19 Nov: she misread "21:52").
+        map(#"(?<![\d:.])\b([01]?\d|2[0-3]):([0-5]\d)(?!:?\d)(?:\s?([ap])(?:m|\.m\.)(?![\w]))?"#) { m in
+            let h = Int(m[1])!, mi = Int(m[2])!, ap = m[3].lowercased()
+            let hour = h == 0 ? "twelve" : numberWords(h)
+            let mins = mi == 0 ? (ap.isEmpty ? (h <= 12 && h > 0 ? " o'clock" : " hundred") : "") : mi < 10 ? " oh " + ones[mi] : " " + numberWords(mi)
+            return hour + mins + (ap.isEmpty ? "" : " " + ap + " m")
+        }
+        map(#"\b(1[0-2]|[1-9])\s?([ap])(?:m|\.m\.)(?![\w])"#) { numberWords(Int($0[1])!) + " " + $0[2].lowercased() + " m" }
         // Scores and ratios: "7:3" -> "7 to 3" (real times like 14:30 have two-digit minutes).
         sub(#"(?<![\d:])\b(\d{1,2}):(\d)\b(?![\d:])"#, "$1 to $2")
 
@@ -357,6 +372,31 @@ public enum TextPrep {
     }
 
     // Run a regex and build each replacement from its groups (group 0 = whole match).
+    /// A link as a person would say it: "github dot com slash earsay". The site always; the path only when it is
+    /// short (up to 2 parts, no query), each part as words, and a part that can't be said is spelled out.
+    static func speakLink(_ raw: String) -> String {
+        var u = raw.replacingOccurrences(of: #"^https?://"#, with: "", options: .regularExpression)
+        u = u.replacingOccurrences(of: #"^www\."#, with: "", options: .regularExpression)
+        let hostEnd = u.firstIndex(where: { "/?#".contains($0) }) ?? u.endIndex
+        let host = String(u[..<hostEnd]).lowercased()
+        let caps: Set<String> = ["ai", "io", "uk", "ng", "tv", "gg"]
+        let spokenHost = host.split(separator: ".").map { caps.contains(String($0)) ? $0.uppercased() : String($0) }.joined(separator: " dot ")
+        let rest = String(u[hostEnd...])
+        if rest.contains("?") || rest.contains("#") { return spokenHost }
+        let parts = rest.split(separator: "/").map(String.init).filter { !$0.isEmpty }
+        guard !parts.isEmpty, parts.count <= 2, parts.allSatisfy({ $0.count <= 24 }) else { return spokenHost }
+        func sayable(_ w: String) -> String {
+            let words = w.replacingOccurrences(of: #"[-_.]+"#, with: " ", options: .regularExpression)
+            return words.split(separator: " ").map { word -> String in
+                let lw = word.lowercased()
+                let hardRun = lw.range(of: #"[bcdfghjklmnpqrstvwxz]{4,}"#, options: .regularExpression) != nil
+                let noVowel = !lw.contains(where: { "aeiouy".contains($0) })
+                return (hardRun || (noVowel && lw.count > 1 && !lw.allSatisfy(\.isNumber))) ? lw.map(String.init).joined(separator: " ") : String(word)
+            }.joined(separator: " ")
+        }
+        return spokenHost + parts.map { " slash " + sayable($0) }.joined()
+    }
+
     static func replace(_ text: String, _ pattern: String, _ f: ([String]) -> String) -> String {
         guard let re = try? NSRegularExpression(pattern: pattern) else { return text }
         var result = text
