@@ -82,6 +82,26 @@ public enum TextPrep {
         return (out, shown)
     }
 
+    /// How `document` turns the lines of one paragraph into spoken lines: each entry is one spoken
+    /// line, as the numbers of the paragraph's own lines it was made from. Lines with no letters
+    /// or numbers are dropped, and a one-word line ("Audio:") is spoken together with the line
+    /// after it. The on-screen highlight uses this to stay on the line being spoken.
+    public static func lineGroups(_ paragraph: String) -> [[Int]] {
+        var groups: [[Int]] = []
+        var tiny: [Int] = []
+        for (i, rawLine) in paragraph.components(separatedBy: "\n").enumerated() {
+            let cleaned = clean(stripBullet(rawLine.trimmingCharacters(in: .whitespaces)))
+            guard cleaned.contains(where: { $0.isLetter || $0.isNumber }) else { continue }
+            if withFullStop(cleaned).split(separator: " ").count <= 1 { tiny.append(i); continue }
+            groups.append(tiny + [i])
+            tiny = []
+        }
+        if !tiny.isEmpty {
+            if groups.isEmpty { groups.append(tiny) } else { groups[groups.count - 1] += tiny }
+        }
+        return groups
+    }
+
     /// A paragraph as it should look in the reader: the original words, minus markdown marks.
     public static func display(_ paragraph: String) -> String {
         paragraph.components(separatedBy: "\n").map { line -> String in

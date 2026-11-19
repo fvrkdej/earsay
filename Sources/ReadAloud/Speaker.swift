@@ -56,7 +56,7 @@ final class Speaker {
     private var timelineStart: [Int: Int] = [:]
     private var pendingSamples: [Int: Int] = [:]
     private var durations: [Int: Double] = [:]
-    static let rates: [Float] = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+    static let rates: [Float] = [0.75, 0.9, 1.0, 1.1, 1.2, 1.25, 1.5, 1.75, 2.0]
 
     var isSpeaking: Bool { generating || piecesStillToPlay > 0 }
     /// Seconds of audio made but not heard yet.
@@ -423,6 +423,9 @@ final class Speaker {
         announced = index
         playingIndex = index
         sentenceStartedAt = Date()
+        // For measuring: how far into the sentence the player's clock already was when we said
+        // "it started" (wall-clock ms: the player's time runs at the speed setting).
+        Log.write("sync: sentence \(index) at \(rate)x, announced \(Int(secondsIntoCurrent() / Double(rate) * 1000)) ms after it began")
         onSentence?(sentences[index], index, sentences.count)
     }
 
@@ -509,7 +512,7 @@ final class Speaker {
     /// Step the speed up (+1) or down (-1). Wraps round when cycling from the pill.
     func changeRate(by step: Int, wrap: Bool = false) {
         let all = Self.rates
-        let i = all.firstIndex(of: rate) ?? 1
+        let i = all.firstIndex(of: rate) ?? all.firstIndex(of: 1.0) ?? 0
         var n = i + step
         if wrap { n = (n + all.count) % all.count } else { n = min(max(n, 0), all.count - 1) }
         rate = all[n]

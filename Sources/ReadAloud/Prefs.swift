@@ -44,7 +44,8 @@ final class Prefs: ObservableObject {
 
     private init() {
         voice = d.string(forKey: "voice") ?? "azelma"
-        defaultRate = d.object(forKey: "defaultRate") as? Float ?? 1.0
+        let saved = d.object(forKey: "defaultRate") as? Float ?? 1.0
+        defaultRate = Speaker.rates.contains(saved) ? saved : 1.0     // a speed no longer on the list: normal
         miniPill = d.bool(forKey: "miniPill")
         highlightOnScreen = d.object(forKey: "highlightOnScreen") as? Bool ?? true
         scrollAlong = d.object(forKey: "scrollAlong") as? Bool ?? true
@@ -127,7 +128,7 @@ struct SettingsView: View {
                     Button("Play") { preview(prefs.voice) }
                 }
                 Picker("Starting speed", selection: $prefs.defaultRate) {
-                    ForEach([Float(0.75), 1.0, 1.25, 1.5, 1.75, 2.0], id: \.self) { Text(PillView.rateLabel($0)).tag($0) }
+                    ForEach(Speaker.rates, id: \.self) { Text(PillView.rateLabel($0)).tag($0) }
                 }
             }
             Section("Shortcut") {

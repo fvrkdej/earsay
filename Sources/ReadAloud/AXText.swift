@@ -3,6 +3,7 @@
 // paragraph, so app controls ("Bypass permissions") aren't read out.
 import AppKit
 import ApplicationServices
+import ReadAloudCore
 
 enum AXText {
     static func attr(_ e: AXUIElement, _ name: String) -> AnyObject? {
@@ -34,21 +35,43 @@ enum AXText {
     /// highlight can follow her. `paragraphs[p]` = the elements of paragraph p, one per line.
     struct Read {
         let text: String
-        let paragraphs: [[AXUIElement]]
+        let paragraphs: [[[AXUIElement]]]     // by paragraph, by spoken line: the elements making that line
         let pid: pid_t
+        var start: Start? = nil
     }
 
-    static func read(at point: CGPoint, pid: pid_t) -> Read? {
+    /// Where the read starts. `trusted`: it was confirmed (the block sits under the click and
+    /// shares words with the screen, or the screen's own line pointed at it). `moved`: the
+    /// screen's line chose a different block than the geometry did. `words`: how many
+    /// distinctive words the screen gave. Never holds text.
+    struct Start { let trusted: Bool; let moved: Bool; let hintWords: Int }
+
+    // Words too common to tell one paragraph from another.
+    static let stopwords: Set<String> = ["the", "and", "you", "for", "that", "this", "with", "are", "was",
+        "were", "not", "but", "your", "from", "have", "has", "had", "can", "will", "all", "its", "it's",
+        "they", "them", "then", "than", "there", "what", "when", "which", "who", "how", "why", "out",
+        "any", "one", "get", "got", "just", "into", "about", "also", "more", "some", "would", "could",
+        "should", "been", "being", "our", "his", "her", "she", "him", "their", "these", "those", "does",
+        "did", "don't", "isn't", "very", "too", "only", "over", "such", "each", "other", "here"]
+
+    /// Distinctive words of a line of text: lower case, 3+ letters, no common words.
+    static func distinctiveWords(_ t: String) -> Set<String> {
+        Set(t.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "'" })
+            .map(String.init).filter { $0.count >= 3 && !stopwords.contains($0) })
+    }
+
+    static func read(at point: CGPoint, pid: pid_t, hint: Set<String> = [], legacy: Bool = false) -> Read? {
         let app = AXUIElementCreateApplication(pid)
         var hit: AXUIElement?
         guard AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit) == .success,
               let hit else { return nil }
-        return read(from: hit, point: point, pid: pid)
+        return read(from: hit, point: point, pid: pid, hint: hint, legacy: legacy)
     }
 
     static func text(from hit: AXUIElement, point: CGPoint) -> String? { read(from: hit, point: point, pid: 0)?.text }
 
-    static func read(from hit: AXUIElement, point: CGPoint, pid: pid_t) -> Read? {
+    /// `hint`: the distinctive words of the line the screen shows nearest the click (empty: unknown).
+    static func read(from hit: AXUIElement, point: CGPoint, pid: pid_t, hint: Set<String> = [], legacy: Bool = false) -> Read? {
         // A native text view (Notes, TextEdit, Mail): read its text from the clicked paragraph.
         // (No highlight there: the whole text is one element.)
         if let native = nativeText(hit, point) { return Read(text: native, paragraphs: [], pid: pid) }
@@ -59,10 +82,81 @@ enum AXText {
         var blocks: [(el: AXUIElement, text: String, list: Bool)] = []
         collect(root, inList: false, into: &blocks)
         guard !blocks.isEmpty else { return nil }
-        // Start at the block that holds the click (or the first block below it).
-        let startIndex = blocks.firstIndex { b in path.contains { CFEqual($0, b.el) } }
-            ?? blocks.firstIndex { (frame($0.el)?.maxY ?? 0) >= point.y }
-            ?? 0
+        // Where to start. Two candidates from where things are:
+        //  - the block on the click's own path (the clicked element, or the nearest ancestor that
+        //    is a block), which the app really put under the click;
+        //  - the smallest block whose frame holds the click (a container with a stray word of
+        //    its own is bigger than the paragraph in it). Chrome gives text scrolled out of view
+        //    a made-up frame near the top, so this one is never taken on geometry alone.
+        // Failing both: the block on the click's row (a click in the margin), else the nearest
+        // block starting just below. Then the screen decides, see below.
+        func f(_ i: Int) -> CGRect? {
+            guard let r = frame(blocks[i].el), r.width > 1, r.height > 1 else { return nil }
+            return r
+        }
+        func holds(_ i: Int, slack: CGFloat) -> Bool {      // the click is in the block's row (and column, give or take `slack`)
+            guard let r = f(i) else { return false }
+            return point.y >= r.minY - 4 && point.y <= r.maxY + 4 && point.x >= r.minX - slack && point.x <= r.maxX + slack
+        }
+        var pathBlock: Int?
+        for el in path { if let i = blocks.firstIndex(where: { CFEqual($0.el, el) }) { pathBlock = i; break } }
+        let pathExact = pathBlock.map { holds($0, slack: 40) } ?? false
+        var small: Int?
+        var bestArea = CGFloat.infinity
+        for i in blocks.indices where holds(i, slack: 4) {
+            let r = f(i)!
+            if r.width * r.height < bestArea { small = i; bestArea = r.width * r.height }
+        }
+        var other: Int?                                      // not on the click: its row, or just below
+        if pathBlock == nil && small == nil {
+            other = blocks.indices.filter { holds($0, slack: 80) }
+                .min { abs(f($0)!.midX - point.x) < abs(f($1)!.midX - point.x) }
+            if other == nil {
+                var nearest = CGFloat.infinity
+                for i in blocks.indices {
+                    guard let r = f(i), r.minY >= point.y - 4, r.minY - point.y < 120, r.minY < nearest else { continue }
+                    other = i; nearest = r.minY
+                }
+            }
+        }
+        // The screen: the block whose words best hold the line the screen shows at the click.
+        func score(_ i: Int) -> Int { distinctiveWords(blocks[i].text).intersection(hint).count }
+        var screen: Int?
+        if hint.count >= 3 {
+            var top = 0
+            for i in blocks.indices {
+                let sc = score(i)
+                let closer: Bool = {
+                    guard sc == top, let b = screen, let r = f(i) else { return false }
+                    guard let rb = f(b) else { return true }
+                    return abs(r.midY - point.y) < abs(rb.midY - point.y)
+                }()
+                if sc > top || closer { top = sc; screen = i }
+            }
+            if let b = screen, !(score(b) >= 3 && Double(score(b)) >= 0.6 * Double(hint.count)) { screen = nil }
+        }
+        let newIndex: Int
+        let trusted: Bool
+        var moved = false
+        let first = pathBlock ?? small ?? other ?? 0
+        if hint.count >= 3 {
+            // The smallest block on the click that shares words with the screen's line, then the
+            // path's block; else the screen's own best match.
+            if let s = small, score(s) >= 2 { newIndex = s; trusted = true }
+            else if let p = pathBlock, pathExact || f(p) == nil, score(p) >= 2 { newIndex = p; trusted = true }
+            else if let b = screen { newIndex = b; trusted = true; moved = b != first }
+            else { newIndex = first; trusted = false }
+        } else {
+            // Nothing on screen to check against: trust only a block that sits on the click.
+            newIndex = first
+            trusted = pathBlock != nil ? pathExact : small != nil
+        }
+        // Debug only (axtest): the way the start was picked before 19 Nov, for before and after.
+        let startIndex = legacy
+            ? (blocks.firstIndex { b in path.contains { CFEqual($0, b.el) } }
+                ?? blocks.firstIndex { (frame($0.el)?.maxY ?? 0) >= point.y } ?? 0)
+            : newIndex
+        let start = Start(trusted: trusted, moved: moved, hintWords: hint.count)
         // List items and table rows next to each other form one paragraph, a line each.
         var paras: [(lines: [String], els: [AXUIElement])] = []
         var prevList = false
@@ -78,14 +172,21 @@ enum AXText {
         let out = paras.map { $0.lines.joined(separator: "\n") }.joined(separator: "\n\n")
         let words = out.split(whereSeparator: \.isWhitespace).count
         guard words >= 3 else { return nil }
-        // TextPrep drops paragraphs and lines with no letters or numbers; drop the same here,
-        // so paragraph numbers line up with what she reads.
-        func speakable(_ t: String) -> Bool { t.contains { $0.isLetter || $0.isNumber } }
-        let kept: [[AXUIElement]] = paras.compactMap { p in
-            let els = zip(p.lines, p.els).filter { speakable($0.0) }.map(\.1)
-            return els.isEmpty ? nil : els
+        // Line up with how the voice splits the text (TextPrep.lineGroups): lines with no words
+        // are dropped, and a one-word line ("Audio:") is spoken with the next one, so its
+        // element joins that line's. Without this the box lags a line behind after every
+        // such line (a parent bullet with a nested list).
+        let kept: [[[AXUIElement]]] = paras.compactMap { p in
+            var elOfLine: [Int] = []                       // the text's own lines, by element
+            for (ei, t) in p.lines.enumerated() { elOfLine += Array(repeating: ei, count: t.components(separatedBy: "\n").count) }
+            let groups = TextPrep.lineGroups(p.lines.joined(separator: "\n")).map { g -> [AXUIElement] in
+                var seen: [Int] = []
+                for l in g where l < elOfLine.count && !seen.contains(elOfLine[l]) { seen.append(elOfLine[l]) }
+                return seen.map { p.els[$0] }
+            }
+            return groups.isEmpty ? nil : groups
         }
-        return Read(text: out, paragraphs: kept, pid: pid)
+        return Read(text: out, paragraphs: kept, pid: pid, start: start)
     }
 
     static func ancestors(_ e: AXUIElement) -> [AXUIElement] {
@@ -236,7 +337,8 @@ enum AXText {
         var found: AXUIElement?
         func walk(_ e: AXUIElement, _ depth: Int) {
             guard found == nil, depth < 60 else { return }
-            if role(e) == "AXStaticText", let v = attr(e, kAXValueAttribute) as? String, v == phrase { found = e; return }
+            if role(e) == "AXStaticText", let v = attr(e, kAXValueAttribute) as? String,
+               v == phrase || (phrase.count >= 20 && v.hasPrefix(phrase)) { found = e; return }
             for c in children(e) { walk(c, depth + 1) }
         }
         for w in wins where found == nil { walk(w, 0) }

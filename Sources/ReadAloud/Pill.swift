@@ -18,6 +18,7 @@ final class PillModel: ObservableObject {
     @Published var caption = ""
     @Published var bookMode = false         // Apple Books: show page buttons too
     @Published var hasChapters = false      // a file with chapters: show chapter buttons
+    @Published var placeOffScreen = false   // the paragraph she's on is out of view: show "Find my place"
     @Published var mini = false             // the small player
     var onPrevChapter: () -> Void = {}
     var onNextChapter: () -> Void = {}
@@ -30,6 +31,8 @@ final class PillModel: ObservableObject {
     var onPrevPage: () -> Void = {}
     var onNextPage: () -> Void = {}
     var onSpeed: () -> Void = {}
+    var onFindPlace: () -> Void = {}
+    var onSpeedMenu: () -> Void = {}          // the speed button: open the list of speeds
     var onClose: () -> Void = {}
 }
 
@@ -48,6 +51,39 @@ struct PillButton: View {
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
         .help(help)
+    }
+}
+
+// "Find my place": a target icon in the accent colour (grey controls around it, so it reads as
+// something to act on). Dips while pressed, and gives one gentle pulse when it appears.
+struct FindPlaceButton: View {
+    let action: () -> Void
+    @State private var pulse = false
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "scope")
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressDip())
+        .foregroundStyle(Color.accentColor)
+        .scaleEffect(pulse ? 1.3 : 1)
+        .help("Find my place")
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.25).delay(0.15)) { pulse = true }
+            withAnimation(.easeInOut(duration: 0.35).delay(0.4)) { pulse = false }
+        }
+    }
+}
+
+// Looks pressed while held: a little smaller and fainter.
+struct PressDip: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.85 : 1)
+            .opacity(configuration.isPressed ? 0.55 : 1)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 
@@ -151,7 +187,11 @@ struct PillView: View {
                 } else if model.hasChapters {
                     PillButton(symbol: "forward.end.fill", help: "Next chapter (Control+Option+Shift+Down)", action: model.onNextChapter)
                 }
-                Button(action: model.onSpeed) {
+                if model.placeOffScreen {
+                    FindPlaceButton(action: model.onFindPlace)
+                        .transition(.scale(scale: 0.5).combined(with: .opacity))
+                }
+                Button(action: model.onSpeedMenu) {
                     Text(Self.rateLabel(model.rate))
                         .font(.system(size: 12, weight: .semibold).monospacedDigit())
                         .frame(width: 44, height: 28)

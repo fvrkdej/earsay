@@ -77,7 +77,7 @@ Native text views (Notes, TextEdit, Mail) give their whole text in one value; we
 
 ```bash
 ./scripts/build.sh                       # build (at low priority) and install to ~/Applications
-osascript -e 'quit app id "io.autimized.readaloud"'; open ~/Applications/Read\ Aloud.app
+osascript -e 'quit app id "io.autimized.readaloud"'; open ~/Applications/Earsay.app
 tail -f ~/.local/share/read-aloud/app.log
 ```
 

@@ -28,6 +28,9 @@ final class BookReader {
     // and joined to the start of the next page, so her voice doesn't drop as if it ended.
     private var carry = ""
 
+    /// Shows where the paragraph she's reading sits on the Books page (set by the app).
+    var highlighter: Highlighter?
+
     /// Short messages for the pill while she's busy flipping ("Finding the next chapter...").
     var onStatus: ((String) -> Void)?
 
@@ -57,13 +60,14 @@ final class BookReader {
         active = true
         pageShown = 0
         guard let (lines, frame, scale) = await readPage(), my == token else { return }
-        var start: String?
+        var paras: [OCRParagraph]?
         if let click {
-            start = OCRLayout.text(from: lines, startingAt: (click.x - frame.minX) * scale, (click.y - frame.minY) * scale)
+            paras = OCRLayout.paragraphs(from: lines, startingAt: (click.x - frame.minX) * scale, (click.y - frame.minY) * scale)
         } else {
-            start = OCRLayout.text(from: lines)
+            paras = OCRLayout.paragraphs(from: lines)
         }
-        guard let text = start, !text.isEmpty else {
+        let text = (paras ?? []).map(\.text).joined(separator: "\n\n")
+        guard !text.isEmpty else {
             Log.write("book: no text on the clicked page"); active = false; return
         }
         lastPage = OCRLayout.text(from: lines)
@@ -71,7 +75,28 @@ final class BookReader {
         carry = ""
         Log.write("book: started, \(lines.count) lines on the first page")
         speaker.onNeedMore = { [weak self] in self?.turnAndAppend() }
-        speaker.speak(hold(text), more: true)
+        let spoken = hold(text)
+        highlighter?.beginBooks(pid: pid, window: windowID)
+        showHighlight(paras ?? [], spoken: spoken, first: 0, frame: frame, scale: scale)
+        speaker.speak(spoken, more: true)
+    }
+
+    // Tell the highlighter where each paragraph of this page sits. The voice's paragraphs
+    // are these blocks minus any with no letters, and minus a last one held back whole for
+    // the next page; if the counts don't add up, show nothing for this page rather than
+    // highlight the wrong paragraph.
+    private func showHighlight(_ paras: [OCRParagraph], spoken: String, first: Int, frame: CGRect, scale: CGFloat) {
+        var units = paras.filter { $0.text.contains { $0.isLetter || $0.isNumber } }
+        let count = TextPrep.document(from: spoken).paragraphs.count
+        if units.count == count + 1 { units.removeLast() }
+        guard units.count == count else {
+            Log.write("book: highlight skipped, \(units.count) blocks but \(count) paragraphs")
+            highlighter?.booksTurning(); return
+        }
+        highlighter?.booksPage(units.map { p in
+            Highlighter.BooksPara(whole: OCRLayout.screenRect(of: p.lines, frame: frame, scale: scale),
+                                  rows: p.rows.map { OCRLayout.screenRect(of: $0, frame: frame, scale: scale) })
+        }, first: first, window: frame)
     }
 
     func end() {
@@ -125,23 +150,28 @@ final class BookReader {
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 guard my == token else { return }
             }
+            highlighter?.booksTurning()
             for attempt in 1...2 {
                 press(right: true)
                 try? await Task.sleep(nanoseconds: attempt == 1 ? 900_000_000 : 1_500_000_000)
                 guard my == token else { return }
-                guard let (lines, _, _) = await readPage(), my == token else { return }
-                let text = OCRLayout.text(from: lines)
+                guard let (lines, frame, scale) = await readPage(), my == token else { return }
+                let paras = OCRLayout.paragraphs(from: lines)
+                let text = paras.map(\.text).joined(separator: "\n\n")
                 if text != lastPage && !text.isEmpty {
                     pageShown += 1
                     lastPage = text
                     pageStarts.append((speaker.sentenceCount, pageShown))
                     Log.write("book: turned to page \(pageShown + 1), \(lines.count) lines")
-                    speaker.append(hold(text))
+                    let spoken = hold(text)
+                    showHighlight(paras, spoken: spoken, first: speaker.paragraphs.count, frame: frame, scale: scale)
+                    speaker.append(spoken)
                     return
                 }
                 Log.write("book: page didn't change after turn \(attempt)")
             }
             Log.write("book: end of the book, or Books didn't turn; finishing")
+            highlighter?.booksStayed()
             if !carry.isEmpty { speaker.append(carry); carry = "" }
             speaker.expectingMore = false
         }
@@ -155,6 +185,7 @@ final class BookReader {
         let my = token
         turning = true
         speaker.stop()
+        highlighter?.beginBooks(pid: pid, window: windowID)
         Task { @MainActor in
             defer { if my == token { turning = false } }
             let presses = target - pageShown
@@ -163,14 +194,17 @@ final class BookReader {
                 try? await Task.sleep(nanoseconds: 450_000_000)
             }
             try? await Task.sleep(nanoseconds: 600_000_000)
-            guard my == token, let (lines, _, _) = await readPage(), my == token else { return }
+            guard my == token, let (lines, frame, scale) = await readPage(), my == token else { return }
             pageShown = target
-            lastPage = OCRLayout.text(from: lines)
+            let paras = OCRLayout.paragraphs(from: lines)
+            lastPage = paras.map(\.text).joined(separator: "\n\n")
             pageStarts = [(0, target)]
             carry = ""
             Log.write("book: jumped to page \(target + 1)")
             speaker.onNeedMore = { [weak self] in self?.turnAndAppend() }
-            speaker.speak(hold(lastPage), more: true)
+            let spoken = hold(lastPage)
+            showHighlight(paras, spoken: spoken, first: 0, frame: frame, scale: scale)
+            speaker.speak(spoken, more: true)
         }
     }
 
@@ -183,6 +217,7 @@ final class BookReader {
         turning = true
         speaker.stop()
         onStatus?(step > 0 ? "Finding the next chapter..." : "Finding the chapter start...")
+        highlighter?.beginBooks(pid: pid, window: windowID)
         Task { @MainActor in
             defer { if my == token { turning = false } }
             // First bring the screen back to the page you were hearing.
@@ -193,27 +228,31 @@ final class BookReader {
             }
             pageShown = page
             var previous = ""
-            var found: [OCRLine]? = nil
+            var found: ([OCRLine], CGRect, CGFloat)? = nil
             for _ in 0..<120 {                                   // never flip more than 120 pages
                 press(right: step > 0)
                 try? await Task.sleep(nanoseconds: 550_000_000)
-                guard my == token, let (lines, _, _) = await readPage(), my == token else { return }
+                guard my == token, let shot = await readPage(), my == token else { return }
+                let lines = shot.0
                 page += step > 0 ? 1 : -1
                 let text = OCRLayout.text(from: lines)
                 if text == previous { break }                    // start or end of the book
                 previous = text
-                if Self.startsChapter(lines) { found = lines; break }
+                if Self.startsChapter(lines) { found = shot; break }
             }
             pageShown = page
             var landed = found
-            if landed == nil { landed = await readPage()?.0 }
-            guard let lines = landed, my == token else { return }
-            lastPage = OCRLayout.text(from: lines)
+            if landed == nil { landed = await readPage() }
+            guard let (lines, frame, scale) = landed, my == token else { return }
+            let paras = OCRLayout.paragraphs(from: lines)
+            lastPage = paras.map(\.text).joined(separator: "\n\n")
             pageStarts = [(0, page)]
             carry = ""
             Log.write("book: chapter jump landed \(page) pages from the start page" + (found == nil ? " (no heading found)" : ""))
             speaker.onNeedMore = { [weak self] in self?.turnAndAppend() }
-            speaker.speak(hold(lastPage), more: true)
+            let spoken = hold(lastPage)
+            showHighlight(paras, spoken: spoken, first: 0, frame: frame, scale: scale)
+            speaker.speak(spoken, more: true)
         }
     }
 

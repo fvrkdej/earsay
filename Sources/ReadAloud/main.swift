@@ -181,12 +181,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pill.model.onSkip = { [weak self] in self?.speaker.skip() }
         pill.model.onPlayPause = { [weak self] in self?.pauseToggle() }
         pill.model.onSpeed = { [weak self] in self?.speed(1, wrap: true) }
+        highlighter.onOffScreen = { [weak self] off in withAnimation(.easeOut(duration: 0.25)) { self?.pill.model.placeOffScreen = off } }
+        pill.model.onFindPlace = { [weak self] in self?.highlighter.scrollToPlace() }
+        pill.model.onSpeedMenu = { [weak self] in self?.speedMenu() }
         pill.model.onPrevChapter = { [weak self] in self?.chapter(-1) }
         pill.model.onNextChapter = { [weak self] in self?.chapter(1) }
         pill.model.onChapterList = { [weak self] in self?.showChapterList() }
         pill.model.onPrevPage = { [weak self] in self?.page(-1) }
         pill.model.onNextPage = { [weak self] in self?.page(1) }
         books.onStatus = { [weak self] text in self?.pill.model.text = text }
+        books.highlighter = highlighter
         pill.model.onReader = { [weak self] in self?.toggleReader() }
         reader.model.onTap = { [weak self] p in self?.speaker.goToParagraph(p) }
         reader.model.onChapter = { [weak self] c in self?.speaker.goToChapter(c) }
@@ -296,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                   let read = AXText.read(from: el, point: CGPoint(x: f.midX, y: f.midY), pid: app.processIdentifier) else {
                 Log.write("hltest: not found"); return
             }
-            self.highlighter.begin(read)
+            self.highlighter.begin(read, window: ScreenText.window(at: CGPoint(x: f.midX, y: f.midY))?.id)
             self.highlighter.follow(paragraph: Int(parts[2]) ?? 0, line: Int(parts[3]) ?? 0)
             Log.write("hltest: \(read.paragraphs.count) paragraphs")
         }
@@ -410,15 +414,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             default: break
             }
         }
-        // Debug only: pretend to click on a phrase ("bundleID|phrase") and save what she'd read.
+        // Debug only: pretend to click on a phrase ("bundleID|phrase", or "bundleID|phrase|real" to
+        // use the screen's own hit test at that spot) and save what she'd read, the way a real
+        // click does it, including the check against the screen. First line says how it started.
         DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("io.autimized.readaloud.axtest"), object: nil, queue: .main
-        ) { note in
-            guard let parts = (note.object as? String)?.components(separatedBy: "|"), parts.count == 2,
+        ) { [weak self] note in
+            guard let self, let parts = (note.object as? String)?.components(separatedBy: "|"), parts.count >= 2,
                   let app = NSRunningApplication.runningApplications(withBundleIdentifier: parts[0]).first else { return }
-            let out = AXText.test(pid: app.processIdentifier, phrase: parts[1]) ?? "(nothing)"
-            try? out.write(toFile: NSHomeDirectory() + "/.local/share/read-aloud/axtest.txt", atomically: true, encoding: .utf8)
-            Log.write("axtest: done")
+            let pid = app.processIdentifier
+            Task { @MainActor in
+                var out = "(nothing)"
+                if parts[1] == "@auto" { out = await self.autoTest(pid: pid, count: Int(parts.count > 2 ? parts[2] : "") ?? 12) }
+                else if let el = AXText.find(pid: pid, phrase: parts[1]), let f = AXText.frame(el) {
+                    let pt = CGPoint(x: f.midX, y: f.midY)
+                    let win = ScreenText.window(at: pt)
+                    let hint = win.map { w in Task { await self.screenHint(click: pt, window: w.frame) } }
+                    let h = await hint?.value ?? []
+                    let r = parts.count > 2 ? AXText.read(at: pt, pid: pid, hint: h) : AXText.read(from: el, point: pt, pid: pid, hint: h)
+                    let how = r?.start.map { "trusted=\($0.trusted) moved=\($0.moved) hintWords=\($0.hintWords)" } ?? "no start info"
+                    out = "clicked at \(Int(pt.x)),\(Int(pt.y)) \(how)\n\n" + (r?.text ?? "(no text at that point)")
+                } else { out = "phrase not found" }
+                try? out.write(toFile: NSHomeDirectory() + "/.local/share/read-aloud/axtest.txt", atomically: true, encoding: .utf8)
+                Log.write("axtest: done")
+            }
         }
         }
 
@@ -539,19 +558,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // First ask the app itself for its text (whole message, even the part scrolled out
             // of view, no buttons). Only if it gives nothing, read the pixels.
             AXText.wake(pid: window.pid)
-            var ax = AXText.read(at: click, pid: window.pid)
-            if ax == nil {
-                try? await Task.sleep(nanoseconds: 600_000_000)   // the app was just woken: give it a moment
-                ax = AXText.read(at: click, pid: window.pid)
+            // The app's tree can still hold the tab you just left (or not be built yet for the
+            // new one). Take its text only if it matches what is on screen at the click;
+            // otherwise give it a moment, ask again once, and failing that read the picture.
+            var ax: AXText.Read?
+            var how = "no text"
+            for attempt in 0...1 {
+                let hint = await screenHint(click: click, window: window.frame)
+                if let r = AXText.read(at: click, pid: window.pid, hint: hint) {
+                    if r.start?.trusted ?? true {
+                        ax = r
+                        how = r.start == nil ? "text view" : (r.start!.moved ? "moved by screen match" : "geometry")
+                        break
+                    }
+                    how = "mismatch"
+                } else { how = "no text" }
+                if attempt == 0 { try? await Task.sleep(nanoseconds: 600_000_000) }
             }
             if let ax {
-                Log.write("screen: click, read the app's own text (\(ax.text.count) characters, \(ax.paragraphs.count) paragraphs to follow)")
+                Log.write("screen: click, start by \(how), read the app's own text (\(ax.text.count) characters, \(ax.paragraphs.count) paragraphs to follow)")
                 currentFile = nil
                 readTitle = NSRunningApplication(processIdentifier: window.pid)?.localizedName ?? "Screen"
                 speaker.speak(ax.text)
-                highlighter.begin(ax)
+                highlighter.begin(ax, window: window.id)
                 return
             }
+            Log.write("screen: app text \(how == "mismatch" ? "start not confirmed by the screen" : "not usable"), picture read")
             highlighter.end()
             target = window.frame
         } else {
@@ -575,6 +607,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Log.write("screen: failed: \(error)")
             NSSound(named: "Tink")?.play()
         }
+    }
+
+    // What the screen shows at the click: OCR a narrow strip of the window (about 18 pt
+    // either side), take the line nearest the click (one holding the click's column wins),
+    // and return its distinctive words. Empty if there's nothing to go on. AXText uses it to
+    // find the block she should start at. Never logged.
+    func screenHint(click: CGPoint, window: CGRect) async -> Set<String> {
+        guard ScreenText.hasPermission else { return [] }
+        let strip = CGRect(x: window.minX, y: click.y - 18, width: window.width, height: 36).intersection(window)
+        guard !strip.isNull,
+              let (image, got, scale) = try? await ScreenText.capture(strip),
+              let lines = try? await Task.detached(priority: .userInitiated, operation: { try ScreenOCR.lines(in: image) }).value
+        else { return [] }
+        func miss(_ l: OCRLine) -> CGFloat {
+            let midY = got.minY + CGFloat(l.y + l.h / 2) / scale
+            let x0 = got.minX + CGFloat(l.x) / scale, x1 = got.minX + CGFloat(l.x + l.w) / scale
+            return abs(midY - click.y) + (click.x >= x0 - 6 && click.x <= x1 + 6 ? 0 : 100)
+        }
+        guard let line = lines.min(by: { miss($0) < miss($1) }) else { return [] }
+        return AXText.distinctiveWords(line.text)
+    }
+
+    // Debug only (axtest "bundleID|@auto|N"): click N visible pieces of text in the app's front
+    // window with the real hit test, the old way and the new way, and say whether each read
+    // starts in the paragraph that holds the piece. Writes counts and the first 5 words only.
+    func autoTest(pid: pid_t, count: Int) async -> String {
+        guard let w = ScreenText.frontWindow(of: pid) else { return "no visible window" }
+        var found: [(el: AXUIElement, v: String, f: CGRect)] = []
+        func walk(_ e: AXUIElement, _ d: Int) {
+            guard d < 60 else { return }
+            if AXText.role(e) == "AXStaticText", let v = AXText.attr(e, kAXValueAttribute) as? String, v.count >= 25,
+               let f = AXText.frame(e), f.width > 40, f.height > 5, f.height < 120,
+               w.frame.insetBy(dx: 30, dy: 60).contains(CGPoint(x: f.midX, y: f.midY)) { found.append((e, v, f)) }
+            for c in AXText.children(e) { walk(c, d + 1) }
+        }
+        if let win = AXText.attr(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute) { walk(win as! AXUIElement, 0) }
+        found.sort { $0.f.midY < $1.f.midY }
+        guard !found.isEmpty else { return "no visible text found" }
+        let step = max(1, found.count / max(count, 1))
+        var lines = ["\(found.count) visible pieces, testing every \(step)th"]
+        var oldOK = [0, 0, 0], newOK = [0, 0, 0], n = 0
+        let names = ["middle", "bottom-left", "left margin"]
+        for i in stride(from: 0, to: found.count, by: step) {
+            let c = found[i]
+            n += 1
+            for k in 0..<3 {
+                let pt = [CGPoint(x: c.f.midX, y: c.f.midY), CGPoint(x: c.f.minX + 6, y: c.f.maxY - 3),
+                          CGPoint(x: c.f.minX - 14, y: c.f.midY)][k]
+                let hint = await screenHint(click: pt, window: w.frame)
+                func start(_ r: AXText.Read?) -> (ok: Bool, five: String) {
+                    guard let r else { return (false, "(none)") }
+                    let first = r.text.components(separatedBy: "\n\n").first ?? ""
+                    return (first.contains(String(c.v.prefix(30))), r.text.split(whereSeparator: \.isWhitespace).prefix(5).joined(separator: " "))
+                }
+                let o = start(AXText.read(at: pt, pid: pid, hint: [], legacy: true))
+                let rn = AXText.read(at: pt, pid: pid, hint: hint)
+                let nw = start(rn)
+                if o.ok { oldOK[k] += 1 }; if nw.ok { newOK[k] += 1 }
+                let how = rn?.start.map { $0.trusted ? ($0.moved ? "moved by screen" : "geometry") : "UNTRUSTED" } ?? "text view"
+                if !o.ok || !nw.ok { lines.append("y=\(Int(c.f.midY)) \(names[k]) hint=\(hint.count) | before: \(o.ok ? "ok" : "WRONG") [\(o.five)] | after: \(nw.ok ? "ok" : "WRONG") [\(nw.five)] \(how)") }
+            }
+        }
+        for k in 0..<3 { lines.append("\(names[k]): before \(oldOK[k])/\(n) right, after \(newOK[k])/\(n) right") }
+        return lines.joined(separator: "\n")
     }
 
     static func warmUpImage() -> CGImage? {
@@ -1028,6 +1124,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func chapterPicked(_ sender: NSMenuItem) {
         speaker.goToChapter(sender.tag)
+    }
+
+    // The pill's speed button: a list of every speed, a tick on the current one. A plain NSMenu
+    // popped at the mouse (the pill never takes focus, so this opens without stealing it).
+    func speedMenu() {
+        let menu = NSMenu()
+        var current: NSMenuItem?
+        for r in Speaker.rates {
+            let item = NSMenuItem(title: PillView.rateLabel(r), action: #selector(pickSpeed(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = NSNumber(value: r)
+            if r == speaker.rate { item.state = .on; current = item }
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: current, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    @objc func pickSpeed(_ item: NSMenuItem) {
+        guard let r = (item.representedObject as? NSNumber)?.floatValue else { return }
+        speaker.setRate(r)
+        pill.model.rate = speaker.rate
+        Log.write("speed \(speaker.rate)x")
+        updateNowPlaying()
     }
 
     func speed(_ step: Int, wrap: Bool = false) {

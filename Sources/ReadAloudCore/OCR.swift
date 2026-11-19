@@ -18,6 +18,15 @@ public struct OCRLine {
     }
 }
 
+/// One paragraph as she speaks it: its text, and the lines it came from. `rows` splits the
+/// lines at each list item, the same way `join` puts a new line before each item, so
+/// "line 2 of this paragraph" means the same thing here as it does to the voice.
+public struct OCRParagraph {
+    public var text: String
+    public var lines: [OCRLine]
+    public var rows: [[OCRLine]]
+}
+
 public enum ScreenOCR {
     /// Every line of text Vision finds in the image.
     public static func lines(in image: CGImage) throws -> [OCRLine] {
@@ -80,7 +89,7 @@ public enum OCRLayout {
         var out = ""
         for l in lines {
             let t = fixMisreads(l.text.trimmingCharacters(in: .whitespaces))
-            let isItem = t.range(of: #"^([•◦○●▪‣*-]|\d{1,3}[.)])\s"#, options: .regularExpression) != nil
+            let isItem = isListItem(t)
             if out.hasSuffix("-"), let f = t.first, f.isLowercase {
                 out.removeLast(); out += t
             } else if isItem && !out.isEmpty {
@@ -101,6 +110,12 @@ public enum OCRLayout {
     /// Everything found, as paragraphs separated by blank lines.
     /// Side-by-side columns are read one after the other, left to right.
     public static func text(from lines: [OCRLine]) -> String {
+        paragraphs(from: lines).map(\.text).joined(separator: "\n\n")
+    }
+
+    /// The same paragraphs `text(from:)` speaks, in the same order, with their lines kept
+    /// so the app can show where each one sits on the page.
+    public static func paragraphs(from lines: [OCRLine]) -> [OCRParagraph] {
         var columns: [[Block]] = []
         for b in blocks(lines) {
             if let i = columns.firstIndex(where: { $0.contains { $0.overlapsX(b) } }) { columns[i].append(b) }
@@ -109,13 +124,50 @@ public enum OCRLayout {
         return columns
             .sorted { ($0.map(\.minX).min() ?? 0) < ($1.map(\.minX).min() ?? 0) }
             .flatMap { $0 }
-            .map { join($0.lines) }
-            .joined(separator: "\n\n")
+            .map(paragraph)
+    }
+
+    static func paragraph(_ b: Block) -> OCRParagraph {
+        OCRParagraph(text: join(b.lines), lines: b.lines, rows: rows(b.lines))
+    }
+
+    static func isListItem(_ t: String) -> Bool {
+        t.range(of: #"^([•◦○●▪‣*-]|\d{1,3}[.)])\s"#, options: .regularExpression) != nil
+    }
+
+    // Lines of one block grouped by what the voice treats as a line: a new one at each list item.
+    static func rows(_ lines: [OCRLine]) -> [[OCRLine]] {
+        var out: [[OCRLine]] = []
+        for l in lines {
+            let t = fixMisreads(l.text.trimmingCharacters(in: .whitespaces))
+            if isListItem(t) && !out.isEmpty { out.append([l]) }
+            else if out.isEmpty { out = [[l]] }
+            else { out[out.count - 1].append(l) }
+        }
+        return out
+    }
+
+    /// Where lines sit on the screen. `frame` is the captured area in screen points
+    /// (top-left origin), `scale` the pixels per point the picture was taken at.
+    public static func screenRect(of lines: [OCRLine], frame: CGRect, scale: CGFloat) -> CGRect {
+        var r = CGRect.null
+        for l in lines {
+            r = r.union(CGRect(x: l.x, y: l.y, width: l.w, height: l.h))
+        }
+        guard !r.isNull else { return .null }
+        return CGRect(x: frame.minX + r.minX / scale, y: frame.minY + r.minY / scale,
+                      width: r.width / scale, height: r.height / scale)
     }
 
     /// Read from the clicked line on: the rest of its paragraph, then every block
     /// below it in the same column (so sidebars and menus beside it are left out).
     public static func text(from lines: [OCRLine], startingAt px: Double, _ py: Double) -> String? {
+        paragraphs(from: lines, startingAt: px, py)?.map(\.text).joined(separator: "\n\n")
+    }
+
+    /// The paragraphs behind `text(from:startingAt:_:)`. The first one's text starts at the
+    /// clicked sentence, but its lines are the whole block (the highlight covers it all).
+    public static func paragraphs(from lines: [OCRLine], startingAt px: Double, _ py: Double) -> [OCRParagraph]? {
         let all = blocks(lines)
         guard !all.isEmpty else { return nil }
         func distance(_ b: Block) -> Double {
@@ -133,10 +185,12 @@ public enum OCRLayout {
                 opening = String(opening[end.upperBound...])
             }
         }
-        var parts = [opening]
+        var first = paragraph(start)
+        first.text = opening
+        var parts = [first]
         for b in all where b.minY > start.minY && b.overlapsX(start) {
-            parts.append(join(b.lines))
+            parts.append(paragraph(b))
         }
-        return parts.joined(separator: "\n\n")
+        return parts
     }
 }
