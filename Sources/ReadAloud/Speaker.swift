@@ -282,6 +282,11 @@ final class Speaker {
     }
 
     /// Roughly how long is left, at the current speed.
+    /// The whole read, start to end, at the current speed (prepared sentences use their real length).
+    func secondsTotal() -> Double {
+        (0..<sentences.count).reduce(0.0) { $0 + length($1) } / Double(rate)
+    }
+
     func secondsLeft() -> Double {
         guard playingIndex < sentences.count else { return 0 }
         let rest = (playingIndex..<sentences.count).reduce(0.0) { $0 + length($1) }

@@ -853,12 +853,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         carryOnItem.isHidden = false
     }
 
-    // The small line under the sentence: chapter, how far, time left (long reads only).
+    // The small line under the sentence: chapter, how far, time left (reads of 2 minutes or more).
     func caption(index: Int, total: Int) -> String {
         if books.active { return "Apple Books, turning pages for you" }
         var parts: [String] = []
         if let ch = speaker.chapterIndex { parts.append("Chapter \(ch + 1) of \(speaker.chapterStarts.count)") }
-        if total >= 40 { parts.append(Self.timeCaption(index: index, total: total, left: speaker.secondsLeft())) }
+        // Shown when the whole read is 2 minutes or more at the current speed; short texts
+        // you can see the end of. Measured on the whole read, so it stays on to the end.
+        if speaker.secondsTotal() >= 120 { parts.append(Self.timeCaption(index: index, total: total, left: speaker.secondsLeft())) }
         if let at = sleepAt { parts.append("sleep in " + Self.minutesLeft(at)) }
         else if sleepAfterChapter != nil { parts.append("sleep at chapter end") }
         return parts.joined(separator: "  ·  ")
